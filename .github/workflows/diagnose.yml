@@ -1,8 +1,7 @@
 name: Diagnose the scrape
 
-# Temporary. The rates appear only after the rates_filter form is submitted.
-# This tries both routes — driving the form in a browser, and a plain GET with
-# the filter as query parameters — and reports which yields parseable rates.
+# Temporary. Dumps the filtered rates table's structure - headers, cells, and
+# the markup of one cell - so the parser can be taught the real column layout.
 # Delete once the parser reads the live page again.
 
 on:
@@ -25,13 +24,12 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
-      - name: Submit the filter, both ways
+      - name: Dump the filtered table
         run: |
           python - <<'PY'
-          import re, pathlib, requests
-          from urllib.parse import urlencode
+          import pathlib
+          from bs4 import BeautifulSoup
           from playwright.sync_api import sync_playwright
-          from tracker.scrape import parse_products, ParseError
 
           URL = "https://mortgages.firstdirect.com/mortgage-rates/list-rates"
           UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -42,74 +40,81 @@ jobs:
               "rates_filter[rateType]": "Fixed",
           }
 
-          def report(tag, html):
-              print("=" * 70)
-              print(f"{tag}: {len(html):,} bytes")
-              pcts = re.findall(r"\d+\.\d+\s*%", html)
-              print(f"  percentages: {len(pcts)} -> {pcts[:10]}")
-              print(f"  '<table' count: {html.lower().count('<table')}")
-              for word in ("LTV", "APRC", "Fee Saver", "Standard"):
-                  print(f"  contains {word!r}: {word.lower() in html.lower()}")
-              try:
-                  products, strategy = parse_products(html)
-                  print(f"  PARSED OK via {strategy}: {len(products)} products")
-                  for p in products[:12]:
-                      print(f"    {p}")
-              except ParseError as exc:
-                  print(f"  parse failed: {exc}")
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page(user_agent=UA, locale="en-GB")
+              page.goto(URL, wait_until="networkidle", timeout=60_000)
+              el = page.query_selector("#consent_prompt_decline")
+              if el:
+                  try:
+                      el.click(timeout=5000)
+                  except Exception:
+                      pass
+              for name, value in FILTER.items():
+                  page.select_option(f"select[name='{name}']", value)
+              page.click("#rates_filter_submit")
+              page.wait_for_load_state("networkidle", timeout=60_000)
+              page.wait_for_timeout(3000)
+              html = page.content()
+              browser.close()
 
-          # --- route 1: plain GET with the filter as query params
-          try:
-              url = f"{URL}?{urlencode(FILTER)}"
-              print("GET", url)
-              r = requests.get(url, timeout=30, headers={"User-Agent": UA,
-                                                         "Accept-Language": "en-GB,en;q=0.9"})
-              print("  status", r.status_code, "final url", r.url)
-              report("plain GET with filter", r.text)
-              pathlib.Path("filtered_get.html").write_text(r.text)
-          except Exception as exc:
-              print("plain GET failed:", type(exc).__name__, exc)
+          pathlib.Path("filtered.html").write_text(html)
+          soup = BeautifulSoup(html, "html.parser")
+          table = soup.find("table")
+          print("table attrs:", dict(table.attrs) if table else None)
 
-          # --- route 2: drive the form in a browser
-          try:
-              with sync_playwright() as p:
-                  browser = p.chromium.launch()
-                  page = browser.new_page(user_agent=UA, locale="en-GB")
-                  page.goto(URL, wait_until="networkidle", timeout=60_000)
+          print("=" * 70)
+          print("CAPTION / PRECEDING HEADINGS")
+          if table:
+              cap = table.find("caption")
+              print("  caption:", (cap.get_text(' ', strip=True)[:200] if cap else None))
+              prev = table.find_previous(["h1", "h2", "h3", "h4"])
+              print("  previous heading:", (prev.get_text(' ', strip=True)[:120] if prev else None))
 
-                  for btn in ("#consent_prompt_decline", "#consent_prompt_submit"):
-                      el = page.query_selector(btn)
-                      if el:
-                          try:
-                              el.click(timeout=5000)
-                              print("clicked", btn)
-                              break
-                          except Exception:
-                              pass
+          print("=" * 70)
+          print("HEADER CELLS")
+          for i, th in enumerate(table.find_all("th")[:15]):
+              print(f"  [{i}] {th.get_text(' ', strip=True)[:110]!r}")
 
-                  for name, value in FILTER.items():
-                      page.select_option(f"select[name='{name}']", value)
-                      print(f"selected {name} = {value}")
+          print("=" * 70)
+          print("FIRST 4 BODY ROWS, CELL BY CELL")
+          rows = table.find_all("tr")
+          shown = 0
+          for r in rows:
+              cells = r.find_all(["td", "th"])
+              if len(cells) < 2:
+                  continue
+              print(f"  --- row with {len(cells)} cells")
+              for i, c in enumerate(cells):
+                  full = c.get_text(" ", strip=True)
+                  # what the text looks like once obvious tooltip markup is dropped
+                  clone = BeautifulSoup(str(c), "html.parser")
+                  for junk in clone.select(
+                      "[class*=tooltip], [class*=more-info], [class*=moreinfo], "
+                      "[class*=accordion], [class*=hidden], [class*=visually], details, dialog"
+                  ):
+                      junk.decompose()
+                  stripped = clone.get_text(" ", strip=True)
+                  print(f"    [{i}] raw={full[:80]!r}")
+                  if stripped != full:
+                      print(f"         stripped={stripped[:80]!r}")
+              shown += 1
+              if shown >= 4:
+                  break
 
-                  page.click("#rates_filter_submit")
-                  page.wait_for_load_state("networkidle", timeout=60_000)
-                  page.wait_for_timeout(3000)
-                  print("url after submit:", page.url)
-
-                  html = page.content()
-                  pathlib.Path("filtered_browser.html").write_text(html)
-                  report("browser, form submitted", html)
-                  browser.close()
-          except Exception as exc:
-              print("browser route failed:", type(exc).__name__, exc)
+          print("=" * 70)
+          print("MARKUP OF ONE NAME-ISH CELL")
+          for r in rows:
+              cells = r.find_all("td")
+              if cells:
+                  print(str(cells[0])[:2500])
+                  break
           PY
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: filtered-html
-          path: |
-            filtered_get.html
-            filtered_browser.html
+          path: filtered.html
           if-no-files-found: ignore
           retention-days: 7
