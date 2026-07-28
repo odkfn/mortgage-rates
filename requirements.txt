@@ -1,0 +1,4 @@
+# Dependencies for the mortgage rate tracker.
+requests==2.32.3
+beautifulsoup4==4.12.3
+pytest==8.3.3

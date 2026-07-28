@@ -1,0 +1,377 @@
+"""Render the rate history as a self-contained HTML page (docs/index.html).
+
+No build step and no CDN: the data is inlined as JSON and the chart is drawn as
+SVG by a small vanilla-JS routine, so the file works from GitHub Pages, from a
+file:// URL, or from your phone offline.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .store import Observation
+
+# Categorical slots 1-6 of the validated default palette, in fixed order.
+SERIES_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"]
+
+
+def build_payload(history: list[Observation], tracked_ids: list[str]) -> dict:
+    dates = sorted({o.date for o in history})
+    products = []
+    for product_id in tracked_ids:
+        rows = {o.date: o for o in history if o.product_id == product_id}
+        if not rows:
+            continue
+        latest = rows[max(rows)]
+        products.append(
+            {
+                "id": product_id,
+                "name": latest.name,
+                "ltv": latest.ltv,
+                "fee": latest.fee,
+                "aprc": latest.aprc,
+                "values": [
+                    (round(rows[d].initial_rate, 4) if d in rows else None) for d in dates
+                ],
+            }
+        )
+    return {
+        "dates": dates,
+        "products": products,
+        "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    }
+
+
+def render(history: list[Observation], tracked_ids: list[str], path: Path) -> dict:
+    payload = build_payload(history, tracked_ids)
+    html = TEMPLATE.replace("__PAYLOAD__", json.dumps(payload, separators=(",", ":")))
+    html = html.replace("__LIGHT__", json.dumps(SERIES_LIGHT))
+    html = html.replace("__DARK__", json.dumps(SERIES_DARK))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html)
+    return payload
+
+
+TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>first direct mortgage rates</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface-1: #fcfcfb;
+    --surface-2: #f4f3f0;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #77766f;
+    --grid: #e3e2dd;
+    --up: #b03a39;
+    --down: #006b3c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface-1: #1a1a19; --surface-2: #232322;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #96958c;
+      --grid: #33332f; --up: #e66767; --down: #4fbf85;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface-1: #1a1a19; --surface-2: #232322;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #96958c;
+    --grid: #33332f; --up: #e66767; --down: #4fbf85;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px;
+    background: var(--surface-1); color: var(--text-primary);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--text-secondary); font-size: 0.87rem; margin: 0 0 24px; }
+  .figure { position: relative; }
+  svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 14px 0 0; padding: 0; list-style: none; }
+  .legend li { display: flex; align-items: center; gap: 7px; font-size: 0.82rem; color: var(--text-secondary); }
+  .legend .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .legend .now { color: var(--text-primary); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .tip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-2); color: var(--text-primary);
+    border: 1px solid var(--grid); border-radius: 8px; padding: 8px 10px;
+    font-size: 0.79rem; line-height: 1.45; white-space: nowrap; z-index: 2;
+    box-shadow: 0 6px 20px rgba(0,0,0,.13);
+  }
+  .tip .d { color: var(--text-secondary); margin-bottom: 4px; }
+  .tip .row { display: flex; align-items: center; gap: 7px; }
+  .tip .row b { font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 12px; }
+  .tip .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  details { margin-top: 28px; border-top: 1px solid var(--grid); padding-top: 14px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 0.85rem; }
+  /* The table is wider than a phone, so it scrolls in its own box. The fades
+     appear only on the side that has more content, so it is discoverable. */
+  .scroll { overflow-x: auto; margin-top: 12px; position: relative; }
+  .scroll-wrap { position: relative; }
+  .scroll-wrap::before, .scroll-wrap::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 28px;
+    pointer-events: none; opacity: 0; transition: opacity .15s; z-index: 1;
+  }
+  .scroll-wrap::before { left: 0; background: linear-gradient(90deg, var(--surface-1), transparent); }
+  .scroll-wrap::after { right: 0; background: linear-gradient(270deg, var(--surface-1), transparent); }
+  .scroll-wrap[data-more-left]::before, .scroll-wrap[data-more-right]::after { opacity: 1; }
+  .hint { color: var(--text-muted); font-size: 0.75rem; margin: 8px 0 0; }
+  table { border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface-1); }
+  thead th { color: var(--text-secondary); font-weight: 600; }
+  .down { color: var(--down); } .up { color: var(--up); }
+  .empty { color: var(--text-muted); padding: 40px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>first direct mortgage rates</h1>
+  <p class="sub" id="sub"></p>
+  <div class="figure">
+    <svg id="chart" viewBox="0 0 1000 430" role="img" aria-label="Daily initial mortgage rates by product"></svg>
+    <div class="tip" id="tip"></div>
+  </div>
+  <ul class="legend" id="legend"></ul>
+  <details>
+    <summary>Show the numbers</summary>
+    <div class="scroll-wrap" id="scrollWrap">
+      <div class="scroll" id="table"></div>
+    </div>
+    <p class="hint" id="hint" hidden>Scroll the table sideways for the rest of the products.</p>
+  </details>
+</div>
+<script>
+const DATA = __PAYLOAD__;
+const LIGHT = __LIGHT__, DARK = __DARK__;
+
+const isDark = () => document.documentElement.dataset.theme === 'dark' ||
+  (document.documentElement.dataset.theme !== 'light' &&
+   matchMedia('(prefers-color-scheme: dark)').matches);
+const colors = () => isDark() ? DARK : LIGHT;
+const colorOf = i => colors()[i % colors().length];
+const fmt = v => v.toFixed(2) + '%';
+const shortDate = s => {
+  const d = new Date(s + 'T00:00:00Z');
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+};
+
+const W = 1000, H = 430, M = { top: 18, right: 16, bottom: 34, left: 52 };
+const svg = document.getElementById('chart');
+const tip = document.getElementById('tip');
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs) => {
+  const node = document.createElementNS(NS, tag);
+  for (const k in attrs) node.setAttribute(k, attrs[k]);
+  return node;
+};
+
+let scaleX, scaleY, hoverDots = [], crosshair = null;
+
+function niceTicks(lo, hi, count) {
+  const raw = (hi - lo) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  const ticks = [];
+  for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) ticks.push(+t.toFixed(6));
+  return ticks;
+}
+
+function draw() {
+  svg.textContent = '';
+  hoverDots = [];
+  const { dates, products } = DATA;
+  const points = products.flatMap(p => p.values).filter(v => v !== null);
+
+  if (!points.length) {
+    svg.insertAdjacentHTML('afterbegin',
+      `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--text-muted)" font-size="15">Waiting for the first reading</text>`);
+    return;
+  }
+
+  const lo = Math.min(...points), hi = Math.max(...points);
+  const pad = Math.max((hi - lo) * 0.18, 0.06);
+  const y0 = lo - pad, y1 = hi + pad;
+  const innerW = W - M.left - M.right, innerH = H - M.top - M.bottom;
+  const n = dates.length;
+
+  scaleX = i => M.left + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+  scaleY = v => M.top + innerH - ((v - y0) / (y1 - y0)) * innerH;
+
+  // Grid + y axis
+  for (const t of niceTicks(y0, y1, 5)) {
+    const y = scaleY(t);
+    svg.append(el('line', { x1: M.left, x2: W - M.right, y1: y, y2: y, stroke: 'var(--grid)', 'stroke-width': 1 }));
+    const label = el('text', { x: M.left - 10, y: y + 4, 'text-anchor': 'end', fill: 'var(--text-muted)', 'font-size': 12 });
+    label.textContent = t.toFixed(2);
+    svg.append(label);
+  }
+
+  // X axis labels, thinned to fit
+  const every = Math.max(1, Math.ceil(n / 7));
+  const lastTick = Math.floor((n - 1) / every) * every;
+  dates.forEach((d, i) => {
+    // Always label the final day, but drop the tick before it if they would collide.
+    if (i === lastTick && i !== n - 1 && n - 1 - lastTick < every * 0.6) return;
+    if (i % every && i !== n - 1) return;
+    const label = el('text', { x: scaleX(i), y: H - 10, 'text-anchor': 'middle', fill: 'var(--text-muted)', 'font-size': 12 });
+    label.textContent = shortDate(d);
+    svg.append(label);
+  });
+
+  crosshair = el('line', { y1: M.top, y2: M.top + innerH, stroke: 'var(--text-muted)', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0 });
+  svg.append(crosshair);
+
+  // One line per product; gaps in the data break the line rather than bridging it.
+  products.forEach((p, pi) => {
+    const color = colorOf(pi);
+    let path = '', pen = false;
+    p.values.forEach((v, i) => {
+      if (v === null) { pen = false; return; }
+      path += (pen ? 'L' : 'M') + scaleX(i).toFixed(1) + ' ' + scaleY(v).toFixed(1) + ' ';
+      pen = true;
+    });
+    svg.append(el('path', {
+      d: path.trim(), fill: 'none', stroke: color, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+
+    // A single reading has no line to see, so mark the point itself.
+    if (p.values.filter(v => v !== null).length === 1) {
+      const i = p.values.findIndex(v => v !== null);
+      svg.append(el('circle', { cx: scaleX(i), cy: scaleY(p.values[i]), r: 4, fill: color }));
+    }
+
+    const dot = el('circle', { r: 5, fill: color, stroke: 'var(--surface-1)', 'stroke-width': 2, opacity: 0 });
+    svg.append(dot);
+    hoverDots.push(dot);
+  });
+
+  svg.append(el('rect', { x: M.left, y: M.top, width: innerW, height: innerH, fill: 'transparent', 'pointer-events': 'all' }));
+}
+
+function nearestIndex(event) {
+  const point = svg.createSVGPoint();
+  point.x = event.clientX; point.y = event.clientY;
+  const local = point.matrixTransform(svg.getScreenCTM().inverse());
+  const n = DATA.dates.length;
+  if (n < 2) return 0;
+  const innerW = W - M.left - M.right;
+  return Math.max(0, Math.min(n - 1, Math.round(((local.x - M.left) / innerW) * (n - 1))));
+}
+
+function showTip(event) {
+  if (!DATA.dates.length || !scaleY) return;
+  const i = nearestIndex(event);
+  const x = scaleX(i);
+  crosshair.setAttribute('x1', x); crosshair.setAttribute('x2', x);
+  crosshair.setAttribute('opacity', 1);
+
+  const rows = [];
+  DATA.products.forEach((p, pi) => {
+    const v = p.values[i], dot = hoverDots[pi];
+    if (v === null || v === undefined) { dot.setAttribute('opacity', 0); return; }
+    dot.setAttribute('cx', x); dot.setAttribute('cy', scaleY(v)); dot.setAttribute('opacity', 1);
+    rows.push({ name: p.name, v, color: colorOf(pi) });
+  });
+  rows.sort((a, b) => a.v - b.v);
+
+  tip.innerHTML = `<div class="d">${shortDate(DATA.dates[i])}</div>` + rows.map(r =>
+    `<div class="row"><span class="sw" style="background:${r.color}"></span>${r.name}<b>${fmt(r.v)}</b></div>`).join('');
+  tip.style.opacity = 1;
+
+  const box = svg.getBoundingClientRect();
+  const px = (x / W) * box.width;
+  const left = Math.min(Math.max(px + 14, 4), Math.max(4, box.width - tip.offsetWidth - 4));
+  tip.style.left = left + 'px';
+  tip.style.top = '10px';
+}
+
+function hideTip() {
+  tip.style.opacity = 0;
+  if (crosshair) crosshair.setAttribute('opacity', 0);
+  hoverDots.forEach(d => d.setAttribute('opacity', 0));
+}
+
+// When every product shares one LTV it belongs in the subtitle, not six times
+// over in the legend.
+const sharedLtv = () => {
+  const set = new Set(DATA.products.map(p => p.ltv));
+  return set.size === 1 && DATA.products.length > 1 ? [...set][0] : null;
+};
+
+function legend() {
+  const list = document.getElementById('legend');
+  const shared = sharedLtv();
+  list.innerHTML = DATA.products.map((p, i) => {
+    const last = [...p.values].reverse().find(v => v !== null);
+    const detail = [(p.ltv && !shared) ? p.ltv + ' LTV' : null,
+                    p.fee !== null && p.fee !== undefined ? '£' + p.fee : null]
+      .filter(Boolean).join(' · ');
+    return `<li><span class="swatch" style="background:${colorOf(i)}"></span>${p.name}` +
+      (detail ? ` <span style="color:var(--text-muted)">(${detail})</span>` : '') +
+      (last !== undefined ? ` <span class="now">${fmt(last)}</span>` : '') + '</li>';
+  }).join('');
+}
+
+function table() {
+  const { dates, products } = DATA;
+  if (!dates.length) { document.getElementById('table').innerHTML = '<p class="empty">No data yet.</p>'; return; }
+  const shown = dates.slice(-30);
+  const head = '<tr><th>Date</th>' + products.map(p => `<th>${p.name}</th>`).join('') + '</tr>';
+  const body = shown.map(d => {
+    const i = dates.indexOf(d);
+    const cells = products.map(p => {
+      const v = p.values[i];
+      if (v === null || v === undefined) return '<td>—</td>';
+      const prev = p.values.slice(0, i).reverse().find(x => x !== null && x !== undefined);
+      const cls = prev === undefined ? '' : v < prev ? ' class="down"' : v > prev ? ' class="up"' : '';
+      return `<td${cls}>${fmt(v)}</td>`;
+    }).join('');
+    return `<tr><td>${d}</td>${cells}</tr>`;
+  }).reverse().join('');
+  document.getElementById('table').innerHTML =
+    `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  updateScrollHints();
+}
+
+function updateScrollHints() {
+  const box = document.getElementById('table');
+  const wrap = document.getElementById('scrollWrap');
+  const overflow = box.scrollWidth - box.clientWidth;
+  wrap.toggleAttribute('data-more-left', box.scrollLeft > 2);
+  wrap.toggleAttribute('data-more-right', box.scrollLeft < overflow - 2);
+  document.getElementById('hint').hidden = overflow <= 2;
+}
+
+function subtitle() {
+  const n = DATA.dates.length;
+  const shared = sharedLtv();
+  document.getElementById('sub').textContent = n
+    ? `Initial rate${shared ? ' at ' + shared + ' LTV' : ''}, checked daily · ` +
+      `${n} day${n === 1 ? '' : 's'} of history · updated ${DATA.updated}`
+    : `No readings yet — the tracker runs once a day · checked ${DATA.updated}`;
+}
+
+function renderAll() { draw(); legend(); table(); subtitle(); }
+renderAll();
+svg.addEventListener('pointermove', showTip);
+svg.addEventListener('pointerleave', hideTip);
+document.getElementById('table').addEventListener('scroll', updateScrollHints);
+document.querySelector('details').addEventListener('toggle', updateScrollHints);
+addEventListener('resize', () => { hideTip(); updateScrollHints(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderAll);
+</script>
+</body>
+</html>
+"""

@@ -1,0 +1,33 @@
+{
+  "url": "https://mortgages.firstdirect.com/mortgage-rates/list-rates",
+
+  "//select": "The page lists dozens of products. These rules pick the wanted six by what they ARE (LTV, term, fee saver vs standard) rather than by name, so a wording change on the page does not break the match. `ltv` at the top applies to every rule unless a rule overrides it. Run `python -m tracker discover` to see what each product on the page is classified as.",
+  "//order": "This list is the display order: it drives the legend, the table columns and which colour each product gets. Standard 2/3/5 year, then Fee Saver 2/3/5 year. Reordering it repaints the chart, so change it deliberately rather than often.",
+  "select": {
+    "ltv": 70,
+    "products": [
+      { "id": "2yr-standard-70", "label": "2 Year Fixed Standard", "term_years": 2, "variant": "standard", "kind": "fixed" },
+      { "id": "3yr-standard-70", "label": "3 Year Fixed Standard", "term_years": 3, "variant": "standard", "kind": "fixed" },
+      { "id": "5yr-standard-70", "label": "5 Year Fixed Standard", "term_years": 5, "variant": "standard", "kind": "fixed" },
+      { "id": "2yr-fee-saver-70", "label": "2 Year Fixed Fee Saver", "term_years": 2, "variant": "fee saver", "kind": "fixed" },
+      { "id": "3yr-fee-saver-70", "label": "3 Year Fixed Fee Saver", "term_years": 3, "variant": "fee saver", "kind": "fixed" },
+      { "id": "5yr-fee-saver-70", "label": "5 Year Fixed Fee Saver", "term_years": 5, "variant": "fee saver", "kind": "fixed" }
+    ]
+  },
+
+  "//track_products": "Escape hatch: exact scraped product ids to track instead of the rules above. Normally empty.",
+  "track_products": [],
+
+  "alert": {
+    "//": "Send a text when a tracked rate falls by at least this many percentage points versus its previous reading.",
+    "drop_threshold_pp": 0.01,
+    "alert_on_record_low": true
+  },
+
+  "//selectors": "Optional CSS selector overrides for the card parser, used only if the automatic strategies fail. See README.md.",
+  "selectors": {
+    "card": null,
+    "name": null,
+    "rate": null
+  }
+}
