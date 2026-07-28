@@ -1,0 +1,87 @@
+name: Diagnose the scrape
+
+# Temporary. Prints the shape of the fetched page into the run log, because the
+# page-html artifact cannot always be downloaded for inspection. Delete once the
+# parser is reading the live page again.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Fetch the page both ways
+        run: |
+          python -m tracker save-html plain.html || echo "plain fetch failed"
+          python -m tracker save-html rendered.html --render || echo "rendered fetch failed"
+
+      - name: Describe what came back
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          from bs4 import BeautifulSoup
+
+          BLOCK_HINTS = [
+              "access denied", "are you a robot", "captcha", "incapsula",
+              "cloudflare", "unusual traffic", "blocked", "forbidden",
+              "enable javascript", "distil", "perimeterx", "akamai",
+          ]
+
+          for name in ("plain.html", "rendered.html"):
+              path = pathlib.Path(name)
+              print("=" * 70)
+              if not path.exists():
+                  print(f"{name}: not fetched")
+                  continue
+              html = path.read_text(errors="replace")
+              soup = BeautifulSoup(html, "html.parser")
+              text = soup.get_text(" ", strip=True)
+              lowered = text.lower()
+
+              print(f"{name}: {len(html):,} bytes")
+              print(f"  <title>: {(soup.title.string or '').strip() if soup.title else '(none)'!r}")
+              print(f"  tables={len(soup.find_all('table'))} "
+                    f"scripts={len(soup.find_all('script'))} "
+                    f"forms={len(soup.find_all('form'))} "
+                    f"iframes={len(soup.find_all('iframe'))}")
+
+              pcts = re.findall(r"\d+\.\d+\s*%", text)
+              print(f"  percentages found: {len(pcts)} -> {pcts[:12]}")
+              for word in ("LTV", "loan to value", "fixed", "fee saver", "APRC", "repayment"):
+                  print(f"  contains {word!r}: {word.lower() in lowered}")
+
+              hits = [h for h in BLOCK_HINTS if h in lowered]
+              print(f"  bot-block/JS hints: {hits or 'none'}")
+              print(f"  first 400 chars of visible text:\n    {text[:400]!r}")
+          PY
+
+      - name: Replay each file through the parser
+        run: |
+          for f in plain.html rendered.html; do
+            echo "===================== discover --html $f"
+            [ -f "$f" ] && python -m tracker discover --html "$f" || echo "(missing)"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnose-html
+          path: |
+            plain.html
+            rendered.html
+          if-no-files-found: ignore
+          retention-days: 7
