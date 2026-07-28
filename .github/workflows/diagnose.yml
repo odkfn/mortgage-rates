@@ -1,14 +1,17 @@
-name: Diagnose the scrape
+name: Capture a live fixture
 
-# Temporary. Dumps the filtered rates table's structure - headers, cells, and
-# the markup of one cell - so the parser can be taught the real column layout.
-# Delete once the parser reads the live page again.
+# Temporary. Submits the rates filter in a browser and commits the resulting
+# rates table into tests/fixtures/ so the parser can be developed against real
+# markup. Delete once the fixture is captured and the parser reads it.
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  diagnose:
+  capture:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +27,7 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
-      - name: Dump the filtered table
+      - name: Capture the filtered table
         run: |
           python - <<'PY'
           import pathlib
@@ -58,63 +61,32 @@ jobs:
               html = page.content()
               browser.close()
 
-          pathlib.Path("filtered.html").write_text(html)
           soup = BeautifulSoup(html, "html.parser")
           table = soup.find("table")
-          print("table attrs:", dict(table.attrs) if table else None)
+          if table is None:
+              raise SystemExit("no table on the filtered page - nothing captured")
 
-          print("=" * 70)
-          print("CAPTION / PRECEDING HEADINGS")
-          if table:
-              cap = table.find("caption")
-              print("  caption:", (cap.get_text(' ', strip=True)[:200] if cap else None))
-              prev = table.find_previous(["h1", "h2", "h3", "h4"])
-              print("  previous heading:", (prev.get_text(' ', strip=True)[:120] if prev else None))
+          rows = [r for r in table.find_all("tr") if len(r.find_all(["td", "th"])) > 1]
+          print(f"captured a table with {len(rows)} rows")
 
-          print("=" * 70)
-          print("HEADER CELLS")
-          for i, th in enumerate(table.find_all("th")[:15]):
-              print(f"  [{i}] {th.get_text(' ', strip=True)[:110]!r}")
-
-          print("=" * 70)
-          print("FIRST 4 BODY ROWS, CELL BY CELL")
-          rows = table.find_all("tr")
-          shown = 0
-          for r in rows:
-              cells = r.find_all(["td", "th"])
-              if len(cells) < 2:
-                  continue
-              print(f"  --- row with {len(cells)} cells")
-              for i, c in enumerate(cells):
-                  full = c.get_text(" ", strip=True)
-                  # what the text looks like once obvious tooltip markup is dropped
-                  clone = BeautifulSoup(str(c), "html.parser")
-                  for junk in clone.select(
-                      "[class*=tooltip], [class*=more-info], [class*=moreinfo], "
-                      "[class*=accordion], [class*=hidden], [class*=visually], details, dialog"
-                  ):
-                      junk.decompose()
-                  stripped = clone.get_text(" ", strip=True)
-                  print(f"    [{i}] raw={full[:80]!r}")
-                  if stripped != full:
-                      print(f"         stripped={stripped[:80]!r}")
-              shown += 1
-              if shown >= 4:
-                  break
-
-          print("=" * 70)
-          print("MARKUP OF ONE NAME-ISH CELL")
-          for r in rows:
-              cells = r.find_all("td")
-              if cells:
-                  print(str(cells[0])[:2500])
-                  break
+          out = pathlib.Path("tests/fixtures/live_filtered_table.html")
+          out.write_text(
+              "<!-- Captured from the live first direct rates page after submitting\n"
+              "     rates_filter: buyerType=RM, mortgageType=repayment, rateType=Fixed.\n"
+              "     Real markup - do not hand-edit. -->\n"
+              "<html><body>\n" + str(table) + "\n</body></html>\n"
+          )
+          print(f"wrote {out} ({out.stat().st_size:,} bytes)")
           PY
 
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: filtered-html
-          path: filtered.html
-          if-no-files-found: ignore
-          retention-days: 7
+      - name: Commit the fixture
+        run: |
+          git config user.name "mortgage-rate-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/fixtures/live_filtered_table.html
+          if git diff --cached --quiet; then
+            echo "fixture unchanged"
+          else
+            git commit -m "Capture the live filtered rates table as a fixture"
+            git push
+          fi
