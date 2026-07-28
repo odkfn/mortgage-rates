@@ -57,7 +57,18 @@
   .tip .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
   details { margin-top: 28px; border-top: 1px solid var(--grid); padding-top: 14px; }
   summary { cursor: pointer; color: var(--text-secondary); font-size: 0.85rem; }
-  .scroll { overflow-x: auto; margin-top: 12px; }
+  /* The table is wider than a phone, so it scrolls in its own box. The fades
+     appear only on the side that has more content, so it is discoverable. */
+  .scroll { overflow-x: auto; margin-top: 12px; position: relative; }
+  .scroll-wrap { position: relative; }
+  .scroll-wrap::before, .scroll-wrap::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 28px;
+    pointer-events: none; opacity: 0; transition: opacity .15s; z-index: 1;
+  }
+  .scroll-wrap::before { left: 0; background: linear-gradient(90deg, var(--surface-1), transparent); }
+  .scroll-wrap::after { right: 0; background: linear-gradient(270deg, var(--surface-1), transparent); }
+  .scroll-wrap[data-more-left]::before, .scroll-wrap[data-more-right]::after { opacity: 1; }
+  .hint { color: var(--text-muted); font-size: 0.75rem; margin: 8px 0 0; }
   table { border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
   th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface-1); }
@@ -77,11 +88,14 @@
   <ul class="legend" id="legend"></ul>
   <details>
     <summary>Show the numbers</summary>
-    <div class="scroll" id="table"></div>
+    <div class="scroll-wrap" id="scrollWrap">
+      <div class="scroll" id="table"></div>
+    </div>
+    <p class="hint" id="hint" hidden>Scroll the table sideways for the rest of the products.</p>
   </details>
 </div>
 <script>
-const DATA = {"dates":[],"products":[],"updated":"2026-07-28 07:19 UTC"};
+const DATA = {"dates":["2026-07-28"],"products":[{"id":"2yr-standard-70","name":"2 Year Fixed Standard","ltv":"70%","fee":490.0,"aprc":6.3,"values":[4.57]},{"id":"3yr-standard-70","name":"3 Year Fixed Standard","ltv":"70%","fee":490.0,"aprc":6.1,"values":[4.76]},{"id":"5yr-standard-70","name":"5 Year Fixed Standard","ltv":"70%","fee":490.0,"aprc":5.7,"values":[4.62]},{"id":"2yr-fee-saver-70","name":"2 Year Fixed Fee Saver","ltv":"70%","fee":0.0,"aprc":6.3,"values":[4.81]},{"id":"3yr-fee-saver-70","name":"3 Year Fixed Fee Saver","ltv":"70%","fee":0.0,"aprc":6.1,"values":[4.96]},{"id":"5yr-fee-saver-70","name":"5 Year Fixed Fee Saver","ltv":"70%","fee":0.0,"aprc":5.8,"values":[4.74]}],"updated":"2026-07-28 09:32 UTC"};
 const LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"], DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"];
 
 const isDark = () => document.documentElement.dataset.theme === 'dark' ||
@@ -270,7 +284,17 @@ function table() {
     return `<tr><td>${d}</td>${cells}</tr>`;
   }).reverse().join('');
   document.getElementById('table').innerHTML =
-    `<table><caption class="sr-only"></caption><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  updateScrollHints();
+}
+
+function updateScrollHints() {
+  const box = document.getElementById('table');
+  const wrap = document.getElementById('scrollWrap');
+  const overflow = box.scrollWidth - box.clientWidth;
+  wrap.toggleAttribute('data-more-left', box.scrollLeft > 2);
+  wrap.toggleAttribute('data-more-right', box.scrollLeft < overflow - 2);
+  document.getElementById('hint').hidden = overflow <= 2;
 }
 
 function subtitle() {
@@ -286,7 +310,9 @@ function renderAll() { draw(); legend(); table(); subtitle(); }
 renderAll();
 svg.addEventListener('pointermove', showTip);
 svg.addEventListener('pointerleave', hideTip);
-addEventListener('resize', () => { hideTip(); });
+document.getElementById('table').addEventListener('scroll', updateScrollHints);
+document.querySelector('details').addEventListener('toggle', updateScrollHints);
+addEventListener('resize', () => { hideTip(); updateScrollHints(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderAll);
 </script>
 </body>
