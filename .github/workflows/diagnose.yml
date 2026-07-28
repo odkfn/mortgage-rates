@@ -1,8 +1,8 @@
 name: Diagnose the scrape
 
-# Temporary. The rates only appear after choosing mortgage type / rate type /
-# repayment type on the page, so this dumps the form controls and the network
-# calls the page makes, to work out what to drive and what to wait for.
+# Temporary. The rates appear only after the rates_filter form is submitted.
+# This tries both routes — driving the form in a browser, and a plain GET with
+# the filter as query parameters — and reports which yields parseable rates.
 # Delete once the parser reads the live page again.
 
 on:
@@ -25,80 +25,91 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
-      - name: Dump the form controls and network traffic
+      - name: Submit the filter, both ways
         run: |
           python - <<'PY'
-          import json, re
+          import re, pathlib, requests
+          from urllib.parse import urlencode
           from playwright.sync_api import sync_playwright
+          from tracker.scrape import parse_products, ParseError
 
           URL = "https://mortgages.firstdirect.com/mortgage-rates/list-rates"
-          calls = []
+          UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+          FILTER = {
+              "rates_filter[buyerType]": "RM",
+              "rates_filter[mortgageType]": "repayment",
+              "rates_filter[rateType]": "Fixed",
+          }
 
-          def note(response):
+          def report(tag, html):
+              print("=" * 70)
+              print(f"{tag}: {len(html):,} bytes")
+              pcts = re.findall(r"\d+\.\d+\s*%", html)
+              print(f"  percentages: {len(pcts)} -> {pcts[:10]}")
+              print(f"  '<table' count: {html.lower().count('<table')}")
+              for word in ("LTV", "APRC", "Fee Saver", "Standard"):
+                  print(f"  contains {word!r}: {word.lower() in html.lower()}")
               try:
-                  ct = response.headers.get("content-type", "")
-              except Exception:
-                  return
-              if "json" in ct or re.search(r"/api/|rates|product", response.url, re.I):
-                  calls.append((response.status, ct.split(";")[0], response.url))
+                  products, strategy = parse_products(html)
+                  print(f"  PARSED OK via {strategy}: {len(products)} products")
+                  for p in products[:12]:
+                      print(f"    {p}")
+              except ParseError as exc:
+                  print(f"  parse failed: {exc}")
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch()
-              page = browser.new_page(
-                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                             "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-                  locale="en-GB",
-              )
-              page.on("response", note)
-              page.goto(URL, wait_until="networkidle", timeout=60_000)
-              page.wait_for_timeout(4000)
+          # --- route 1: plain GET with the filter as query params
+          try:
+              url = f"{URL}?{urlencode(FILTER)}"
+              print("GET", url)
+              r = requests.get(url, timeout=30, headers={"User-Agent": UA,
+                                                         "Accept-Language": "en-GB,en;q=0.9"})
+              print("  status", r.status_code, "final url", r.url)
+              report("plain GET with filter", r.text)
+              pathlib.Path("filtered_get.html").write_text(r.text)
+          except Exception as exc:
+              print("plain GET failed:", type(exc).__name__, exc)
 
-              print("=" * 70)
-              print("final url:", page.url)
-              print("percentages in DOM right now:",
-                    len(re.findall(r"\d+\.\d+\s*%", page.inner_text("body"))))
+          # --- route 2: drive the form in a browser
+          try:
+              with sync_playwright() as p:
+                  browser = p.chromium.launch()
+                  page = browser.new_page(user_agent=UA, locale="en-GB")
+                  page.goto(URL, wait_until="networkidle", timeout=60_000)
 
-              print("=" * 70)
-              print("SELECTS")
-              for sel in page.query_selector_all("select"):
-                  name = sel.get_attribute("name") or sel.get_attribute("id") or "?"
-                  opts = [(o.get_attribute("value"), (o.inner_text() or "").strip())
-                          for o in sel.query_selector_all("option")]
-                  print(f"  select name/id={name!r}")
-                  for value, label in opts[:20]:
-                      print(f"      value={value!r} label={label!r}")
+                  for btn in ("#consent_prompt_decline", "#consent_prompt_submit"):
+                      el = page.query_selector(btn)
+                      if el:
+                          try:
+                              el.click(timeout=5000)
+                              print("clicked", btn)
+                              break
+                          except Exception:
+                              pass
 
-              print("=" * 70)
-              print("RADIO / CHECKBOX INPUTS")
-              for inp in page.query_selector_all("input[type=radio], input[type=checkbox]"):
-                  iid = inp.get_attribute("id")
-                  label = ""
-                  if iid:
-                      lab = page.query_selector(f"label[for='{iid}']")
-                      if lab:
-                          label = (lab.inner_text() or "").strip()
-                  print(f"  type={inp.get_attribute('type')!r} name={inp.get_attribute('name')!r} "
-                        f"id={iid!r} value={inp.get_attribute('value')!r} label={label!r}")
+                  for name, value in FILTER.items():
+                      page.select_option(f"select[name='{name}']", value)
+                      print(f"selected {name} = {value}")
 
-              print("=" * 70)
-              print("BUTTONS / SUBMITS")
-              for b in page.query_selector_all("button, input[type=submit], a[role=button]"):
-                  text = (b.inner_text() or "").strip().replace("\n", " ")
-                  if text:
-                      print(f"  <{b.evaluate('e => e.tagName.toLowerCase()')}> "
-                            f"id={b.get_attribute('id')!r} text={text[:60]!r}")
+                  page.click("#rates_filter_submit")
+                  page.wait_for_load_state("networkidle", timeout=60_000)
+                  page.wait_for_timeout(3000)
+                  print("url after submit:", page.url)
 
-              print("=" * 70)
-              print("HEADINGS")
-              for h in page.query_selector_all("h1, h2, h3")[:25]:
-                  t = (h.inner_text() or "").strip().replace("\n", " ")
-                  if t:
-                      print(f"  {t[:90]!r}")
-
-              browser.close()
-
-          print("=" * 70)
-          print("INTERESTING NETWORK CALLS")
-          for status, ct, url in calls[:40]:
-              print(f"  {status} {ct:24} {url[:160]}")
+                  html = page.content()
+                  pathlib.Path("filtered_browser.html").write_text(html)
+                  report("browser, form submitted", html)
+                  browser.close()
+          except Exception as exc:
+              print("browser route failed:", type(exc).__name__, exc)
           PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filtered-html
+          path: |
+            filtered_get.html
+            filtered_browser.html
+          if-no-files-found: ignore
+          retention-days: 7
