@@ -35,7 +35,9 @@ MONEY_RE = re.compile(r"£\s*([\d,]+(?:\.\d{2})?)")
 
 # Header/key keyword sets, most specific first.
 RATE_KEYS = ("initial rate", "initial interest", "interest rate", "rate")
-APRC_KEYS = ("aprc", "apr")
+APRC_KEYS = ("aprc", "apr", "overall cost")
+# Booking fee first: it is the fee that separates a Fee Saver from a Standard
+# product (£0 against £490), where the arrangement fee is £0 on both.
 FEE_KEYS = ("booking fee", "product fee", "fee")
 LTV_KEYS = ("loan to value", "ltv")
 NAME_KEYS = ("product", "mortgage", "deal", "type", "term")
@@ -208,6 +210,38 @@ def parse_embedded_json(html: str) -> list[Product]:
 # --------------------------------------------------------------------------
 
 
+# Markup that carries no value of its own: explanatory tooltips, the label
+# repeated for the mobile layout, screen-reader text and sort buttons.
+CELL_NOISE_SELECTORS = (
+    ".tooltip-container, .tooltip__content, [role=tooltip], .mobile-th-text, "
+    ".visuallyhidden, .visually-hidden, .sr-only, .screen-reader-text, "
+    "[hidden], button, script, style"
+)
+TOOLTIP_RE = re.compile(r"\bmore info\b", re.I)
+
+
+def cell_text(cell: Tag) -> str:
+    """The text of a table cell as a sighted reader sees it.
+
+    Rate tables repeat the column's own label inside every cell and hang a
+    "More info" explanation off it, and the product cell carries a
+    screen-reader span restating the LTV and the rate. Left in, they mislead
+    every value parser: the hidden span alone makes a product name look like a
+    percentage, and a stray "product" in an explanation makes the wrong column
+    look like the product column.
+    """
+    clone = BeautifulSoup(str(cell), "html.parser")
+    for junk in clone.select(CELL_NOISE_SELECTORS):
+        junk.decompose()
+    # Fallback for pages that mark tooltips up some other way.
+    return clean_text(TOOLTIP_RE.split(clone.get_text(" "), maxsplit=1)[0])
+
+
+def header_text(cell: Tag) -> str:
+    """The name of a column, preferring an explicit one over the rendered text."""
+    return clean_text(cell.get("data-col-title") or cell_text(cell))
+
+
 def _header_index(headers: list[str], keys: Iterable[str]) -> int | None:
     for key in keys:
         for index, header in enumerate(headers):
@@ -241,7 +275,7 @@ def parse_tables(html: str) -> list[Product]:
     # Scan every table: a rate page often uses one table per LTV band.
     for table in soup.find_all("table"):
         header_cells = table.find_all("th")
-        headers = [clean_text(cell.get_text()).lower() for cell in header_cells]
+        headers = [header_text(cell).lower() for cell in header_cells]
         rate_col = _header_index(headers, RATE_KEYS)
         if rate_col is None:
             continue
@@ -255,7 +289,7 @@ def parse_tables(html: str) -> list[Product]:
             cells = row.find_all(["td", "th"])
             if len(cells) <= rate_col:
                 continue
-            values = [clean_text(cell.get_text()) for cell in cells]
+            values = [cell_text(cell) for cell in cells]
             rate = to_percent(values[rate_col])
             if rate is None:
                 continue  # header row, or a row without a usable rate
@@ -382,10 +416,10 @@ def parse_products(html: str, selectors: dict[str, str | None] | None = None) ->
     )
 
 
-def fetch_html(url: str, render: bool = False) -> str:
+def fetch_html(url: str, render: bool = False, form: dict[str, Any] | None = None) -> str:
     """Fetch the page, optionally rendering it in a headless browser first."""
-    if render:
-        return _fetch_rendered(url)
+    if render or form:
+        return _fetch_rendered(url, form)
     response = requests.get(
         url,
         timeout=REQUEST_TIMEOUT,
@@ -399,21 +433,56 @@ def fetch_html(url: str, render: bool = False) -> str:
     return response.text
 
 
-def _fetch_rendered(url: str) -> str:
+def _fetch_rendered(url: str, form: dict[str, Any] | None = None) -> str:
+    """Render the page in a headless browser, optionally submitting a filter.
+
+    first direct lists no rates until the "Find a rate" filter is applied, and
+    it submits as a POST, so there is no query string that reaches the results
+    and no way to do this without a browser.
+    """
     from playwright.sync_api import sync_playwright
 
+    choices = (form or {}).get("select") or {}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
             page = browser.new_page(user_agent=USER_AGENT, locale="en-GB")
             page.goto(url, wait_until="networkidle", timeout=60_000)
+            if not choices:
+                return page.content()
+
+            # A cookie banner overlays the form and swallows the clicks.
+            for selector in (form or {}).get("dismiss") or []:
+                element = page.query_selector(selector)
+                if element:
+                    try:
+                        element.click(timeout=5_000)
+                    except Exception:
+                        pass  # already gone, or harmless where it is
+
+            for selector, value in choices.items():
+                page.select_option(selector, value)
+            submit = (form or {}).get("submit")
+            if submit:
+                page.click(submit)
+            page.wait_for_load_state("networkidle", timeout=60_000)
             return page.content()
         finally:
             browser.close()
 
 
-def scrape(url: str, selectors: dict[str, str | None] | None = None) -> tuple[list[Product], str]:
+def scrape(
+    url: str,
+    selectors: dict[str, str | None] | None = None,
+    form: dict[str, Any] | None = None,
+) -> tuple[list[Product], str]:
     """Fetch and parse, falling back to a rendered browser fetch if needed."""
+    if (form or {}).get("select"):
+        # The rates only exist after the filter is submitted, so a plain fetch
+        # cannot succeed and is not worth the request.
+        html = fetch_html(url, form=form)
+        products, strategy = parse_products(html, selectors)
+        return products, f"{strategy} (filtered)"
     try:
         html = fetch_html(url)
         return parse_products(html, selectors)

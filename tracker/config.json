@@ -1,6 +1,17 @@
 {
   "url": "https://mortgages.firstdirect.com/mortgage-rates/list-rates",
 
+  "//form": "The page shows no rates until this filter is submitted, so the scrape drives it in a headless browser. `select` maps a CSS selector to the option value to choose, `submit` is the button that applies it, and `dismiss` are things to click out of the way first (the cookie banner). Emptying `select` turns the whole step off and goes back to a plain fetch.",
+  "form": {
+    "select": {
+      "select[name='rates_filter[buyerType]']": "RM",
+      "select[name='rates_filter[mortgageType]']": "repayment",
+      "select[name='rates_filter[rateType]']": "Fixed"
+    },
+    "submit": "#rates_filter_submit",
+    "dismiss": ["#consent_prompt_decline"]
+  },
+
   "//select": "The page lists dozens of products. These rules pick the wanted six by what they ARE (LTV, term, fee saver vs standard) rather than by name, so a wording change on the page does not break the match. `ltv` at the top applies to every rule unless a rule overrides it. Run `python -m tracker discover` to see what each product on the page is classified as.",
   "//order": "This list is the display order: it drives the legend, the table columns and which colour each product gets. Standard 2/3/5 year, then Fee Saver 2/3/5 year. Reordering it repaints the chart, so change it deliberately rather than often.",
   "select": {

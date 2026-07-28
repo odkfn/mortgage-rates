@@ -23,7 +23,24 @@ tests/                                 parser + alert tests, run before each scr
 
 ### 1. Check it is picking the right six products
 
-The page lists dozens of products across every LTV band. Selection is by
+The page shows **no rates at all** until its "Find a rate" filter is submitted,
+and it submits as a POST, so there is no URL that goes straight to the results.
+The scrape therefore drives the form in a headless browser. Which options it
+picks is `form` in `tracker/config.json` — remortgaging, repayment, fixed:
+
+```json
+"select": {
+  "select[name='rates_filter[buyerType]']": "RM",
+  "select[name='rates_filter[mortgageType]']": "repayment",
+  "select[name='rates_filter[rateType]']": "Fixed"
+}
+```
+
+Emptying `select` turns the step off and goes back to a plain fetch. There is no
+LTV control on the form, so every band comes back in one table and the rules
+below narrow it to 70%.
+
+The filtered page lists dozens of products across every LTV band. Selection is by
 **criteria, not names** — `select` in `tracker/config.json` says "70% LTV, 2/3/5
 year, fixed, fee saver or standard", and the matcher works out which rows on the
 page those are. That way first direct rewording a product name does not break the
@@ -33,6 +50,7 @@ Verify it against the live page:
 
 ```bash
 pip install -r requirements.txt
+pip install playwright && playwright install chromium   # the filter needs a browser
 python -m tracker discover
 ```
 
@@ -233,6 +251,9 @@ like:
 python -m tracker discover --html page.html
 ```
 
+Note that `save-html` submits the filter too, so the saved file is the results
+page rather than the empty one.
+
 Parsing tries three strategies in order and keeps the first that finds anything:
 
 1. **`embedded_json`** — rate data serialised into a `<script>` tag.
@@ -256,10 +277,18 @@ Two escape hatches, in order of effort:
   suite runs before every scrape, so a parser regression fails the job instead of
   quietly recording nothing.
 
-If the plain HTTP fetch returns a page without rates in it, the run automatically
-retries through a headless Chromium, which handles the page being rendered in
-JavaScript. A day where nothing parses records nothing — it never writes a blank
-or a zero into the history.
+With a `form` filter configured the run goes straight to headless Chromium,
+since a plain fetch cannot reach the rates and the request would be wasted. With
+no filter configured it tries plain HTTP first and only falls back to the
+browser if the page comes back without rates in it. Either way, a day where
+nothing parses records nothing — it never writes a blank or a zero into the
+history.
+
+Cells on this table repeat their own column heading and carry a "More info"
+tooltip, and the product cell hides a screen-reader span quoting the LTV and the
+rate. All of it is stripped before the values are read: left in, the hidden span
+alone makes the product name scan as a percentage, and the word "product" inside
+the APRC tooltip is enough to make the parser mistake that column for the name.
 
 ## Notes
 

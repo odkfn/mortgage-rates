@@ -1,21 +1,26 @@
 """Tests for the parser, the store and the alert logic.
 
-The fixtures are three plausible shapes of the same six products. They are NOT
-copies of the live page - if the real page parses into something else, add a
-saved copy of it here as a fourth fixture and make the parser satisfy it too.
+Three of the fixtures are plausible shapes of the same six products, written by
+hand. ``live_filtered_table.html`` is different: it is a real capture of the
+rates table the live page serves once its filter is submitted, committed by the
+capture workflow. When the two disagree, the live one is right.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 
 from tracker import backfill, chart, notify, select, store
 from tracker import config as config_mod
 from tracker.scrape import (
     ParseError,
     Product,
+    cell_text,
+    header_text,
     parse_cards,
     parse_embedded_json,
     parse_products,
@@ -593,3 +598,121 @@ def test_chart_handles_an_empty_history(tmp_path):
     payload = chart.render([], [], path)
     assert payload["products"] == [] and payload["dates"] == []
     assert path.exists()
+
+
+# ------------------------------------------------------- the live rates table
+
+# A real capture, so these tests are the ones that say whether the tracker
+# works against the site as it actually is. The rates move daily; the shape
+# does not, so assert on the shape and on plausibility, never on today's rate.
+
+LIVE_PRODUCT_IDS = [
+    "2yr-standard-70",
+    "3yr-standard-70",
+    "5yr-standard-70",
+    "2yr-fee-saver-70",
+    "3yr-fee-saver-70",
+    "5yr-fee-saver-70",
+]
+
+
+def live_products():
+    products, strategy = parse_products(fixture("live_filtered_table.html"))
+    assert strategy == "tables"
+    return products
+
+
+def test_live_table_parses_six_products_across_six_ltv_bands():
+    products = live_products()
+    assert len(products) == 36
+    assert len({p.name for p in products}) == 6
+    assert sorted({p.ltv for p in products}) == ["60%", "70%", "75%", "80%", "85%", "90%"]
+
+
+def test_live_names_are_the_product_not_the_fee_column():
+    """The name cell hides a screen-reader span quoting the LTV and the rate.
+    Read naively it looks like a percentage, the name column gets rejected, and
+    every product ends up named after a fee."""
+    names = {p.name for p in live_products()}
+    assert names == {
+        f"{term} Year Fixed Repayment - {variant}"
+        for term in (2, 3, 5)
+        for variant in ("Fee Saver", "Standard")
+    }
+
+
+def test_live_cells_carry_no_tooltip_prose():
+    for product in live_products():
+        assert "More info" not in product.name
+        assert "£" not in product.name and "%" not in product.name
+        assert re.fullmatch(r"\d{2}%", product.ltv or ""), product.ltv
+
+
+def test_live_rates_are_plausible_and_distinct_per_band():
+    products = live_products()
+    for product in products:
+        assert 0 < product.initial_rate < 25
+        assert product.aprc is None or 0 < product.aprc < 25
+    two_year_fee_saver = sorted(
+        (p.ltv, p.initial_rate) for p in products
+        if p.name == "2 Year Fixed Repayment - Fee Saver"
+    )
+    # A higher LTV is never cheaper than a lower one.
+    rates = [rate for _, rate in two_year_fee_saver]
+    assert rates == sorted(rates)
+
+
+def test_live_booking_fee_separates_the_two_variants():
+    fees = {p.name.split("- ")[-1]: p.fee for p in live_products()}
+    assert fees["Fee Saver"] == 0.0
+    assert fees["Standard"] > 0
+
+
+def test_live_table_selects_exactly_the_tracked_six():
+    cfg = config_mod.load()
+    selection = select.apply_rules(live_products(), select.rules_from_config(cfg))
+    assert [p.product_id for p in selection.products] == LIVE_PRODUCT_IDS
+    assert selection.unmatched == []
+    assert selection.ambiguous == {}
+    assert all(p.ltv == "70%" for p in selection.products)
+
+
+def test_cell_text_drops_tooltips_hidden_text_and_sort_buttons():
+    cell = BeautifulSoup(
+        """<td><a>2 Year Fixed Repayment - Fee Saver
+             <span class="visuallyhidden">with 60% LTV and interest rate 4.71%</span></a>
+           <div class="tooltip-container" role="tooltip">
+             <button><span class="visuallyhidden">More info</span></button>
+             <div class="tooltip__content">An explanation mentioning a product.</div>
+           </div></td>""",
+        "html.parser",
+    ).find("td")
+    assert cell_text(cell) == "2 Year Fixed Repayment - Fee Saver"
+
+
+def test_header_text_prefers_the_declared_column_title():
+    th = BeautifulSoup(
+        '<th data-col-title="booking fee"><button>Sort Booking fee</button>'
+        '<span>Booking fee</span></th>',
+        "html.parser",
+    ).find("th")
+    assert header_text(th) == "booking fee"
+
+
+def test_tooltip_prose_does_not_capture_the_name_column():
+    """The APRC tooltip says "...depending on the product chosen", which is
+    enough to make that column look like the product column."""
+    html = """<table>
+      <tr>
+        <th data-col-title="Mortgage">Mortgage</th>
+        <th data-col-title="Interest rate">Interest rate</th>
+        <th data-col-title="Overall cost for comparison">Overall cost
+          <div class="tooltip-container" role="tooltip">APRC varies by the product chosen.</div>
+        </th>
+      </tr>
+      <tr><td>2 Year Fixed Repayment - Standard</td><td>4.57%</td><td>6.3%</td></tr>
+    </table>"""
+    products = parse_tables(html)
+    assert [p.name for p in products] == ["2 Year Fixed Repayment - Standard"]
+    assert products[0].initial_rate == 4.57
+    assert products[0].aprc == 6.3

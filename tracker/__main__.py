@@ -70,7 +70,7 @@ def cmd_discover(args, cfg) -> int:
         html = Path(args.html).read_text()
         products, strategy = parse_products(html, cfg["selectors"])
     else:
-        products, strategy = scrape(cfg["url"], cfg["selectors"])
+        products, strategy = scrape(cfg["url"], cfg["selectors"], cfg["form"])
     _print_products(products, strategy)
     _apply_selection(products, cfg)
     print(
@@ -82,7 +82,7 @@ def cmd_discover(args, cfg) -> int:
 
 
 def cmd_save_html(args, cfg) -> int:
-    html = fetch_html(cfg["url"], render=args.render)
+    html = fetch_html(cfg["url"], render=args.render, form=cfg["form"])
     Path(args.path).write_text(html)
     print(f"Wrote {len(html):,} bytes to {args.path}")
     return 0
@@ -143,7 +143,7 @@ def cmd_run(args, cfg) -> int:
     if args.html:
         products, strategy = parse_products(Path(args.html).read_text(), cfg["selectors"])
     else:
-        products, strategy = scrape(cfg["url"], cfg["selectors"])
+        products, strategy = scrape(cfg["url"], cfg["selectors"], cfg["form"])
     _print_products(products, strategy)
 
     tracked = _tracked_ids(cfg, products)

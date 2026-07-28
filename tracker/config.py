@@ -22,6 +22,7 @@ DEFAULTS: dict[str, Any] = {
     "select": {"ltv": None, "products": []},
     "alert": {"drop_threshold_pp": 0.01, "alert_on_record_low": True},
     "selectors": {"card": None, "name": None, "rate": None},
+    "form": {"select": {}, "submit": None, "dismiss": []},
 }
 
 
