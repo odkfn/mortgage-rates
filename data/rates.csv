@@ -485,3 +485,9 @@ date,product_id,name,initial_rate,aprc,fee,ltv
 2026-10-17,3yr-standard-70,3 Year Fixed Standard,5.17,6.1,490,70%
 2026-10-17,5yr-fee-saver-70,5 Year Fixed Fee Saver,5.33,5.9,0,70%
 2026-10-17,5yr-standard-70,5 Year Fixed Standard,5.23,5.9,490,70%
+2026-10-18,2yr-fee-saver-70,2 Year Fixed Fee Saver,5.46,6.2,0,70%
+2026-10-18,2yr-standard-70,2 Year Fixed Standard,5.18,6.2,490,70%
+2026-10-18,3yr-fee-saver-70,3 Year Fixed Fee Saver,5.42,6.1,0,70%
+2026-10-18,3yr-standard-70,3 Year Fixed Standard,5.17,6.1,490,70%
+2026-10-18,5yr-fee-saver-70,5 Year Fixed Fee Saver,5.33,5.9,0,70%
+2026-10-18,5yr-standard-70,5 Year Fixed Standard,5.23,5.9,490,70%
